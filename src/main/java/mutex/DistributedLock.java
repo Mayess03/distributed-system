@@ -10,16 +10,19 @@ public class DistributedLock {
 
     public static boolean acquire(String taskId) {
 
+        // 🔥 déjà exécuté
         if (executedTasks.contains(taskId)) {
             return false;
         }
 
+        // 🔥 déjà en cours (lock)
         return locks.putIfAbsent(taskId, true) == null;
     }
 
     public static void release(String taskId) {
         locks.remove(taskId);
 
+        // 🔥 marquer comme exécuté
         executedTasks.add(taskId);
     }
 }
