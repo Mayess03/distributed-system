@@ -6,6 +6,7 @@ import io.grpc.stub.StreamObserver;
 
 import proto.*;
 import consensus.PaxosProposer;
+import consensus.DecisionStore;
 import model.NodeInfo;
 import mutex.DistributedLock;
 import client.TaskClientGrpc;
@@ -52,23 +53,27 @@ public class TaskServer {
             String taskId = request.getTaskId();
             String payload = request.getPayload();
 
-            System.out.println("\nRéception de la tâche "
-                    + taskId + " sur le node " + nodeId);
+            System.out.println("\nRéception de la tâche " + taskId + " sur node " + nodeId);
 
             int executorNodeId;
 
-            // =================================================
-            // 1. Lancer Paxos uniquement si pas encore fait
-            // =================================================
-            if (!request.getAlreadyConsensusDone()) {
+            // =====================================================
+            // 1. CHECK : décision déjà connue
+            // =====================================================
+            if (DecisionStore.hasDecision(taskId)) {
+
+                executorNodeId = DecisionStore.getDecision(taskId);
+
+                System.out.println("Consensus déjà connu pour " + taskId +
+                        " → executor = " + executorNodeId);
+
+            } else {
 
                 System.out.println("Consensus pas encore fait → lancement Paxos");
 
-                PaxosProposer proposer =
-                        new PaxosProposer(nodes, nodeId);
+                PaxosProposer proposer = new PaxosProposer(nodes, nodeId);
 
-                executorNodeId =
-                        proposer.proposeExecutor(taskId);
+                executorNodeId = proposer.proposeExecutor(taskId);
 
                 if (executorNodeId == -1) {
 
@@ -83,26 +88,18 @@ public class TaskServer {
                     return;
                 }
 
-            } else {
-
-                System.out.println(
-                        "Consensus déjà fait → exécution directe");
-
-                executorNodeId = nodeId;
+                // 🔥 SAVE DECISION (IMPORTANT)
+                DecisionStore.saveDecision(taskId, executorNodeId);
             }
 
-            // =================================================
-            // 2. Redirection vers executor
-            // =================================================
+            // =====================================================
+            // 2. REDIRECTION
+            // =====================================================
             if (executorNodeId != nodeId) {
 
-                System.out.println(
-                        "Node " + nodeId +
-                                " n'est pas l'executor choisi");
-
-                System.out.println(
-                        "Redirection vers node "
-                                + executorNodeId);
+                System.out.println("Node " + nodeId +
+                        " n'est pas executor → redirection vers node " +
+                        executorNodeId);
 
                 NodeInfo executor = nodes.stream()
                         .filter(n -> n.id == executorNodeId)
@@ -122,41 +119,32 @@ public class TaskServer {
                     return;
                 }
 
-                TaskClientGrpc client =
-                        new TaskClientGrpc(nodes);
+                TaskClientGrpc client = new TaskClientGrpc(nodes);
 
-                // IMPORTANT → éviter relance Paxos
-                TaskRequest redirectedRequest =
-                        TaskRequest.newBuilder()
-                                .setTaskId(request.getTaskId())
-                                .setPayload(request.getPayload())
-                                .setAlreadyConsensusDone(true)
-                                .build();
+                TaskRequest redirected = TaskRequest.newBuilder()
+                        .setTaskId(taskId)
+                        .setPayload(payload)
+                        .setAlreadyConsensusDone(true)
+                        .build();
 
-                TaskResponse response =
-                        client.sendToNode(
-                                redirectedRequest,
-                                executor
-                        );
+                TaskResponse response = client.sendToNode(redirected, executor);
 
                 responseObserver.onNext(response);
                 responseObserver.onCompleted();
                 return;
             }
 
-            // =================================================
-            // 3. Mutex
-            // =================================================
+            // =====================================================
+            // 3. MUTEX
+            // =====================================================
             if (!DistributedLock.acquire(taskId)) {
 
-                System.out.println(
-                        "Tâche " + taskId +
-                                " déjà exécutée ou en cours");
+                System.out.println("Tâche déjà exécutée : " + taskId);
 
                 responseObserver.onNext(
                         TaskResponse.newBuilder()
-                                .setStatus("REFUSE")
-                                .setResult("Tâche déjà exécutée")
+                                .setStatus("REFUSED")
+                                .setResult("Déjà exécutée")
                                 .build()
                 );
 
@@ -164,33 +152,25 @@ public class TaskServer {
                 return;
             }
 
-            // =================================================
-            // 4. Exécution
-            // =================================================
+            // =====================================================
+            // 4. EXECUTION
+            // =====================================================
             try {
 
-                System.out.println(
-                        "Node " + nodeId +
-                                " exécute la tâche " + taskId);
+                System.out.println("Node " + nodeId +
+                        " exécute la tâche " + taskId);
 
                 Thread.sleep(1000);
 
                 String result = payload.toUpperCase();
 
-                System.out.println(
-                        "Tâche " + taskId +
-                                " exécutée avec succès par node "
-                                + nodeId);
+                System.out.println("Tâche " + taskId +
+                        " exécutée par node " + nodeId);
 
                 responseObserver.onNext(
                         TaskResponse.newBuilder()
                                 .setStatus("OK")
-                                .setResult(
-                                        "Résultat du node "
-                                                + nodeId
-                                                + " : "
-                                                + result
-                                )
+                                .setResult("Node " + nodeId + " → " + result)
                                 .build()
                 );
 
@@ -198,8 +178,8 @@ public class TaskServer {
 
                 responseObserver.onNext(
                         TaskResponse.newBuilder()
-                                .setStatus("ERREUR")
-                                .setResult("Erreur d'exécution")
+                                .setStatus("ERROR")
+                                .setResult("Erreur")
                                 .build()
                 );
 
@@ -210,88 +190,53 @@ public class TaskServer {
             responseObserver.onCompleted();
         }
 
-        // =========================================
-        // PHASE 1 : PREPARE
-        // =========================================
+        // =====================================================
+        // PAXOS PREPARE
+        // =====================================================
         @Override
         public void prepare(PrepareRequest request,
                             StreamObserver<PrepareResponse> responseObserver) {
 
-            int proposalId = request.getProposalId();
-
-            System.out.println(
-                    "Node " + nodeId +
-                            " reçoit PREPARE : "
-                            + proposalId);
-
             boolean promise = false;
 
-            if (proposalId > promisedId) {
-                promisedId = proposalId;
+            if (request.getProposalId() > promisedId) {
+                promisedId = request.getProposalId();
                 promise = true;
             }
 
-            PrepareResponse response =
+            responseObserver.onNext(
                     PrepareResponse.newBuilder()
                             .setPromise(promise)
-                            .setAcceptedProposalId(
-                                    acceptedProposalId
-                            )
-                            .setAcceptedNodeId(
-                                    acceptedNodeId
-                            )
-                            .build();
+                            .setAcceptedProposalId(acceptedProposalId)
+                            .setAcceptedNodeId(acceptedNodeId)
+                            .build()
+            );
 
-            if (promise) {
-                System.out.println(
-                        "Node " + nodeId +
-                                " → PROMISE"
-                );
-            }
-
-            responseObserver.onNext(response);
             responseObserver.onCompleted();
         }
 
-        // =========================================
-        // PHASE 2 : ACCEPT
-        // =========================================
+        // =====================================================
+        // PAXOS ACCEPT
+        // =====================================================
         @Override
         public void accept(AcceptRequest request,
                            StreamObserver<AcceptResponse> responseObserver) {
 
-            int proposalId = request.getProposalId();
-            int proposedNodeId =
-                    request.getProposedNodeId();
-
-            System.out.println(
-                    "Node " + nodeId +
-                            " reçoit ACCEPT pour node "
-                            + proposedNodeId
-            );
-
             boolean accepted = false;
 
-            if (proposalId >= promisedId) {
-                acceptedProposalId = proposalId;
-                acceptedNodeId = proposedNodeId;
+            if (request.getProposalId() >= promisedId) {
+                promisedId = request.getProposalId();
+                acceptedProposalId = request.getProposalId();
+                acceptedNodeId = request.getProposedNodeId();
                 accepted = true;
             }
 
-            AcceptResponse response =
+            responseObserver.onNext(
                     AcceptResponse.newBuilder()
                             .setAccepted(accepted)
-                            .build();
+                            .build()
+            );
 
-            if (accepted) {
-                System.out.println(
-                        "Node " + nodeId +
-                                " accepte executor "
-                                + proposedNodeId
-                );
-            }
-
-            responseObserver.onNext(response);
             responseObserver.onCompleted();
         }
     }
