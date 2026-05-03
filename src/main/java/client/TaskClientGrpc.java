@@ -35,6 +35,7 @@ public class TaskClientGrpc {
         TaskRequest request = TaskRequest.newBuilder()
                 .setTaskId(taskId)
                 .setPayload(payload)
+                .setAlreadyConsensusDone(false)
                 .build();
 
         TaskResponse response = stub.submitTask(request);
@@ -53,6 +54,22 @@ public class TaskClientGrpc {
 
         ManagedChannel channel = ManagedChannelBuilder
                 .forAddress(leader.host, leader.port)
+                .usePlaintext()
+                .build();
+
+        TaskServiceGrpc.TaskServiceBlockingStub stub =
+                TaskServiceGrpc.newBlockingStub(channel);
+
+        TaskResponse response = stub.submitTask(request);
+
+        channel.shutdown();
+
+        return response;
+    }
+    public TaskResponse sendToNode(TaskRequest request, NodeInfo node) {
+
+        ManagedChannel channel = ManagedChannelBuilder
+                .forAddress(node.host, node.port)
                 .usePlaintext()
                 .build();
 

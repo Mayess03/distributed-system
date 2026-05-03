@@ -5,14 +5,42 @@ option java_package = "proto";
 
 service TaskService {
   rpc SubmitTask(TaskRequest) returns (TaskResponse);
+
+  rpc Prepare(PrepareRequest) returns (PrepareResponse);
+
+  rpc Accept(AcceptRequest) returns (AcceptResponse);
 }
 
 message TaskRequest {
   string taskId = 1;
   string payload = 2;
+
+  // évite de relancer Paxos après redirection
+  bool alreadyConsensusDone = 3;
 }
 
 message TaskResponse {
   string status = 1;
   string result = 2;
+}
+
+message PrepareRequest {
+  int32 proposalId = 1;
+  string taskId = 2;
+}
+
+message PrepareResponse {
+  bool promise = 1;
+  int32 acceptedProposalId = 2;
+  int32 acceptedNodeId = 3;
+}
+
+message AcceptRequest {
+  int32 proposalId = 1;
+  string taskId = 2;
+  int32 proposedNodeId = 3;
+}
+
+message AcceptResponse {
+  bool accepted = 1;
 }
